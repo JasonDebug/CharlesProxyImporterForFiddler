@@ -6,6 +6,7 @@ using System.Windows.Forms;
 using Fiddler;
 using Newtonsoft.Json;
 using CharlesProxy;
+using System.Net;
 
 [ProfferFormat("Charles Proxy", "Session List in Charles JSON Format. This is the general format for mobile devices using Charles on mobile devices.", ".chlsj")]
 public class CharlesProxyImporter : ISessionImporter
@@ -53,18 +54,43 @@ public class CharlesProxyImporter : ISessionImporter
                     // TODO: Likely SSL, display this properly
                     // I'll need to rebuild the SSL display in Fiddler based on other metadata
                     // Charles just gives the encrypted bytes in the response body
+
                     continue;
                 }
 
-                var reqBytes = ExtractData(session.Request);
-                var respBytes = ExtractData(session.Response);                
+                // Exports from Charles binary to json does some strange things to the format
+                // This recreates the "first line" of the request/response
+                if (null != session.Request.Header && null == session.Request.Header.FirstLine)
+                {
+                    session.Request.Header.FirstLine = session.RequestLine;
+                }
+                if (null != session.Request.Header && null == session.Response.Header.FirstLine)
+                {
+                    session.Response.Header.FirstLine = $"{session.ProtocolVersion} {session.Response.Status} {(HttpStatusCode)session.Response.Status}";
+                }
 
+                var reqBytes = ExtractData(session.Request);
+                var respBytes = ExtractData(session.Response);
                 var newSession = new Session(reqBytes, respBytes);
 
                 if (newSession.ResponseHeaders.ExistsAndContains("Transfer-Encoding", "chunked"))
                 {
                     newSession.ResponseHeaders.Remove("Transfer-Encoding");
-                    newSession.ResponseHeaders.Add("Transfer-Encoding-Removed", "CharlesProxyImporter removed this header as .chlsj are already de-chunked.");
+                    newSession.ResponseHeaders.Add("Transfer-Encoding-Removed", "[Chunked] CharlesProxyImporter removed this header as .chlsj are already de-chunked.");
+                }
+
+                if (newSession.ResponseHeaders.ExistsAndContains("Content-Encoding", "gzip") &&
+                   (newSession.responseBodyBytes[0] != 0x1f && newSession.responseBodyBytes[1] != 0x8b))
+                {
+                    newSession.ResponseHeaders.Remove("Content-Encoding");
+                    newSession.ResponseHeaders.Add("Content-Encoding-Removed", "[gzip] CharlesProxyImporter removed this header as this .chlsj is already decoded.");
+                }
+
+                if (session.Scheme == HttpScheme.https)
+                {
+                    newSession.oRequest.headers.UriScheme = "https";
+
+                    //System.Net.Security.SslStream st = new System.Net.Security.SslStream(new MemoryStream(respBytes));
                 }
 
                 sessions.Add(newSession);
@@ -108,6 +134,10 @@ public class CharlesProxyImporter : ISessionImporter
                 headerBytes = Encoding.UTF8.GetBytes(session.Header.ToString() + Environment.NewLine + Environment.NewLine);
             }
         }
+        else
+        {
+            headerBytes = Encoding.UTF8.GetBytes($"Content-Length: {session.SizeInfo.body + Environment.NewLine + Environment.NewLine}");
+        }
 
         // Body
         if (session.SizeInfo.body > 0)
@@ -132,6 +162,8 @@ public class CharlesProxyImporter : ISessionImporter
         byte[] sessionBytes = new byte[headerBytes.Length + bodyBytes.Length];
         headerBytes.CopyTo(sessionBytes, 0);
         bodyBytes.CopyTo(sessionBytes, headerBytes.Length);
+
+        //System.Net.Security.SslStream st = new System.Net.Security.SslStream(new MemoryStream(bodyBytes));
 
         return sessionBytes;
     }
